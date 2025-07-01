@@ -1,7 +1,3 @@
-Absolutely, Squall! Creating a good README.md file is crucial for any GitHub repository. It's like a welcome mat for your project, telling people what it is, how to use it, and why it's awesome.
-
-Here's a README.md for your remnawave-tls repository, designed to be clear, helpful, and engaging, just like your scripts!
-
 remnawave-tls
 Automation Scripts for Xray Node and Remnawave Panel SSL Certificate Management
 Overview
