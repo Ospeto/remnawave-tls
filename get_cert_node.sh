@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- Default Configuration Values ---
-DEFAULT_MARZBAN_COMPOSE_DIR="/opt/marzban" # Adjust if your Marzban docker-compose.yml is elsewhere
+DEFAULT_REMNAWAVE_COMPOSE_DIR="/opt/remnawave" # Adjust if your Remnawave docker-compose.yml is elsewhere
 DEFAULT_PANEL_HOST_CERT_BASE_PATH="/opt/remnawave/ssl_certs"
 DEFAULT_CONTAINER_CERT_BASE_PATH="/var/lib/remnawave/configs/xray/ssl"
 
@@ -31,9 +31,9 @@ command_exists() {
 }
 
 # --- Main Script ---
-echo "--- Xray Node SSL Certificate Automation Script (Bash) ---"
-echo "This script will copy certificates from your Node VPS and update Marzban's Docker Compose."
-echo "---------------------------------------------------------"
+echo "--- Xray Node SSL Certificate Automation Script (Bash) for Remnawave Panel ---"
+echo "This script will copy certificates from your Node VPS and update Remnawave's Docker Compose."
+echo "-----------------------------------------------------------------------------"
 
 # 1. Check for 'yq' tool
 echo "Checking for 'yq' tool..."
@@ -47,10 +47,10 @@ else
 fi
 
 # Get User Inputs for Configuration Paths
-MARZBAN_COMPOSE_DIR=$(get_input_with_default "Enter Marzban docker-compose.yml directory" "$DEFAULT_MARZBAN_COMPOSE_DIR")
+REMNAWAVE_COMPOSE_DIR=$(get_input_with_default "Enter Remnawave docker-compose.yml directory" "$DEFAULT_REMNAWAVE_COMPOSE_DIR")
 PANEL_HOST_CERT_BASE_PATH=$(get_input_with_default "Enter Panel Host Base Certs Directory" "$DEFAULT_PANEL_HOST_CERT_BASE_PATH")
 CONTAINER_CERT_BASE_PATH=$(get_input_with_default "Enter Container Base Certs Directory (for Xray config)" "$DEFAULT_CONTAINER_CERT_BASE_PATH")
-DOCKER_COMPOSE_FILE="${MARZBAN_COMPOSE_DIR}/docker-compose.yml"
+DOCKER_COMPOSE_FILE="${REMNAWAVE_COMPOSE_DIR}/docker-compose.yml"
 
 # Get Node Specific Inputs
 NODE_IP=$(get_input_with_default "Enter Node VPS IP Address" "")
@@ -74,7 +74,7 @@ if [[ -z "$NODE_USER" ]]; then # If $USER is empty for some reason, default to r
 fi
 
 echo -e "\n--- Automating SSL Certificate Setup for Node: ${NODE_DOMAIN} (${NODE_IP}) ---"
-echo "Marzban Compose Dir: ${MARZBAN_COMPOSE_DIR}"
+echo "Remnawave Compose Dir: ${REMNAWAVE_COMPOSE_DIR}"
 echo "Panel Host Certs Dir: ${PANEL_HOST_CERT_BASE_PATH}"
 echo "Container Certs Dir: ${CONTAINER_CERT_BASE_PATH}"
 
@@ -141,10 +141,10 @@ update_docker_compose_volumes() {
 
 # --- Function to restart Docker Compose ---
 restart_docker_compose() {
-    local marzban_compose_dir="$1"
+    local remnawave_compose_dir="$1" # Updated variable name
     echo "Restarting Docker Compose to apply changes..."
     
-    cd "${marzban_compose_dir}" || { echo "Error: Could not change to Marzban compose directory."; return 1; }
+    cd "${remnawave_compose_dir}" || { echo "Error: Could not change to Remnawave compose directory."; return 1; } # Updated variable name
     
     if ! sudo docker compose down; then
         echo "Error: Failed to stop Docker Compose."; return 1;
@@ -166,7 +166,7 @@ if ! CONTAINER_NODE_CERT_PATH=$(update_docker_compose_volumes "$DOCKER_COMPOSE_F
     exit 1
 fi
 
-if ! restart_docker_compose "$MARZBAN_COMPOSE_DIR"; then
+if ! restart_docker_compose "$REMNAWAVE_COMPOSE_DIR"; then # Updated variable name
     echo "Script aborted due to Docker Compose restart error."
     exit 1
 fi
@@ -174,7 +174,7 @@ fi
 echo -e "\n--- Automation Complete ---"
 echo "SSL Certificate setup for ${NODE_DOMAIN} is complete on Panel VPS."
 echo "Next Steps:"
-echo "1. Log in to your Marzban Panel (Web UI)."
+echo "1. Log in to your Remnawave Panel (Web UI)."
 echo "2. When configuring the Xray Inbound for ${NODE_DOMAIN}, ensure you set the certificate paths as follows:"
 echo "   \"keyFile\": \"${CONTAINER_NODE_CERT_PATH}/privkey.pem\","
 echo "   \"certificateFile\": \"${CONTAINER_NODE_CERT_PATH}/fullchain.pem\""
