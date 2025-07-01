@@ -1,9 +1,8 @@
 #!/bin/bash
 
 # --- Default Configuration Values ---
-DEFAULT_REMNAWAVE_COMPOSE_DIR="/opt/remnawave" # Adjust if your Remnawave docker-compose.yml is elsewhere
-DEFAULT_PANEL_HOST_CERT_BASE_PATH="/opt/remnawave/ssl_certs"
-DEFAULT_CONTAINER_CERT_BASE_PATH="/var/lib/remnawave/configs/xray/ssl"
+DEFAULT_XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json" # Common Xray config path
+DEFAULT_LE_CERT_BASE_PATH="/etc/letsencrypt/live" # Standard Let's Encrypt certs path
 
 # --- Function to get user input with a default value ---
 get_input_with_default() {
@@ -31,153 +30,117 @@ command_exists() {
 }
 
 # --- Main Script ---
-echo "--- Xray Node SSL Certificate Automation Script (Bash) for Remnawave Panel ---"
-echo "This script will copy certificates from your Node VPS and update Remnawave's Docker Compose."
-echo "-----------------------------------------------------------------------------"
+echo "--- Xray Node SSL Certificate Path Updater (Bash) ---"
+echo "This script will find your Let's Encrypt certificates and update your Xray config.json."
+echo "-----------------------------------------------------"
 
-# 1. Check for 'yq' tool
-echo "Checking for 'yq' tool..."
-if ! command_exists yq; then
-    echo "Error: 'yq' tool not found. Please install it first."
-    echo "  For Ubuntu/Debian: sudo snap install yq"
-    echo "  Refer to https://github.com/mikefarah/yq for other installation methods."
+# 1. Check for 'jq' tool
+echo "Checking for 'jq' tool (JSON processor)..."
+if ! command_exists jq; then
+    echo "Error: 'jq' tool not found. Please install it first."
+    echo "  For Ubuntu/Debian: sudo apt update && sudo apt install -y jq"
+    echo "  Refer to https://stedolan.github.io/jq/ for other installation methods."
     exit 1
 else
-    echo "'yq' is installed."
+    echo "'jq' is installed."
 fi
 
-# Get User Inputs for Configuration Paths
-REMNAWAVE_COMPOSE_DIR=$(get_input_with_default "Enter Remnawave docker-compose.yml directory" "$DEFAULT_REMNAWAVE_COMPOSE_DIR")
-PANEL_HOST_CERT_BASE_PATH=$(get_input_with_default "Enter Panel Host Base Certs Directory" "$DEFAULT_PANEL_HOST_CERT_BASE_PATH")
-CONTAINER_CERT_BASE_PATH=$(get_input_with_default "Enter Container Base Certs Directory (for Xray config)" "$DEFAULT_CONTAINER_CERT_BASE_PATH")
-DOCKER_COMPOSE_FILE="${REMNAWAVE_COMPOSE_DIR}/docker-compose.yml"
-
-# Get Node Specific Inputs
-NODE_IP=$(get_input_with_default "Enter Node VPS IP Address" "")
-if [[ -z "$NODE_IP" ]]; then
-    echo "Node IP Address cannot be empty. Exiting."
-    exit 1
-fi
-
-NODE_DOMAIN=$(get_input_with_default "Enter Node VPS Domain Name (e.g., node1.example.com)" "")
+# Get User Inputs
+NODE_DOMAIN=$(get_input_with_default "Enter Node Domain Name (e.g., node1.example.com for which certs are issued)" "")
 if [[ -z "$NODE_DOMAIN" ]]; then
     echo "Node Domain Name cannot be empty. Exiting."
     exit 1
 fi
 
-SSH_KEY_PATH=$(get_input_with_default "Enter SSH Private Key Path (optional, leave empty if using password or agent)" "")
-
-# Get Node SSH User (default to current user or root)
-NODE_USER=$(get_input_with_default "Enter Node VPS SSH Username" "$USER")
-if [[ -z "$NODE_USER" ]]; then # If $USER is empty for some reason, default to root
-    NODE_USER="root"
+XRAY_CONFIG_FILE=$(get_input_with_default "Enter Xray config.json path" "$DEFAULT_XRAY_CONFIG_PATH")
+if [[ ! -f "$XRAY_CONFIG_FILE" ]]; then
+    echo "Error: Xray config file not found at ${XRAY_CONFIG_FILE}. Please provide the correct path."
+    exit 1
 fi
 
-echo -e "\n--- Automating SSL Certificate Setup for Node: ${NODE_DOMAIN} (${NODE_IP}) ---"
-echo "Remnawave Compose Dir: ${REMNAWAVE_COMPOSE_DIR}"
-echo "Panel Host Certs Dir: ${PANEL_HOST_CERT_BASE_PATH}"
-echo "Container Certs Dir: ${CONTAINER_CERT_BASE_PATH}"
+# Determine certificate paths
+CERT_DIR="${DEFAULT_LE_CERT_BASE_PATH}/${NODE_DOMAIN}"
+PRIVKEY_PATH="${CERT_DIR}/privkey.pem"
+FULLCHAIN_PATH="${CERT_DIR}/fullchain.pem"
 
-# --- Function to copy certs from Node VPS ---
-copy_certs_from_node() {
-    local node_user="$1"
-    local node_ip="$2"
-    local node_domain="$3"
-    local panel_host_cert_base_path="$4"
-    local ssh_key_path="$5"
+if [[ ! -f "$PRIVKEY_PATH" || ! -f "$FULLCHAIN_PATH" ]]; then
+    echo "Error: SSL certificates not found for ${NODE_DOMAIN} at ${CERT_DIR}."
+    echo "Please ensure Let's Encrypt certificates are issued and located there."
+    exit 1
+fi
 
-    local node_cert_path="/etc/letsencrypt/live/${node_domain}"
-    local panel_node_cert_path="${panel_host_cert_base_path}/${node_domain}"
+echo -e "\n--- Configuration Summary ---"
+echo "Node Domain: ${NODE_DOMAIN}"
+echo "Xray Config File: ${XRAY_CONFIG_FILE}"
+echo "Private Key Path: ${PRIVKEY_PATH}"
+echo "Fullchain Cert Path: ${FULLCHAIN_PATH}"
+echo "-----------------------------"
 
-    echo "Creating destination directory on Panel VPS: ${panel_node_cert_path}"
-    sudo mkdir -p "${panel_node_cert_path}" || { echo "Error: Could not create directory."; return 1; }
+# Find the tag for the inbound that uses TLS
+echo -e "\nSearching for TLS inbound tag in ${XRAY_CONFIG_FILE}..."
+# This finds the tag of the inbound that has streamSettings.security as "tls" AND has "serverName" matching NODE_DOMAIN
+TLS_INBOUND_TAG=$(jq -r ".inbounds[] | select(.streamSettings.security == \"tls\" and .streamSettings.tlsSettings.serverName == \"${NODE_DOMAIN}\") | .tag" "$XRAY_CONFIG_FILE")
 
-    echo "Copying SSL Certificates from Node VPS (${node_user}@${node_ip}:${node_cert_path}) to Panel VPS..."
-    local scp_command=("scp" "-r")
-    if [[ -n "$ssh_key_path" ]]; then
-        scp_command+=("-i" "$ssh_key_path")
-    fi
-    
-    scp_command+=("${node_user}@${node_ip}:${node_cert_path}/." "$panel_node_cert_path")
+if [[ -z "$TLS_INBOUND_TAG" ]]; then
+    echo "Error: Could not find an Xray inbound with TLS security and serverName matching '${NODE_DOMAIN}'."
+    echo "Please ensure your Xray config has a TLS inbound for this domain."
+    echo "Exiting."
+    exit 1
+else
+    echo "Found TLS inbound tag: '${TLS_INBOUND_TAG}'"
+fi
 
-    # Use eval to run the scp command to handle potential quoting/expansion issues with ssh_key_path
-    if ! "${scp_command[@]}"; then
-        echo "Error: Failed to copy certificates. Check SSH access and paths."
-        return 1
-    fi
+# Backup the original Xray config
+echo "Creating a backup of your Xray config: ${XRAY_CONFIG_FILE}.bak"
+sudo cp "$XRAY_CONFIG_FILE" "${XRAY_CONFIG_FILE}.bak" || { echo "Error: Failed to create backup. Exiting."; exit 1; }
 
-    echo "Certificates copied successfully."
-    echo "$panel_node_cert_path" # Return the path for later use
-}
+echo "Updating certificate paths in Xray config.json using 'jq'..."
 
-# --- Function to update docker-compose.yml volumes using yq ---
-update_docker_compose_volumes() {
-    local docker_compose_file="$1"
-    local node_domain="$2"
-    local panel_node_cert_path="$3"
-    local container_cert_base_path="$4"
+# Update the certificate paths for the identified inbound tag
+# Construct the jq filter dynamically
+JQ_FILTER="
+.inbounds[] |= if .tag == \"${TLS_INBOUND_TAG}\" then
+    .streamSettings.tlsSettings.certificates[0].keyFile = \"${PRIVKEY_PATH}\" |
+    .streamSettings.tlsSettings.certificates[0].certificateFile = \"${FULLCHAIN_PATH}\"
+else
+    .
+end
+"
 
-    echo "Updating ${docker_compose_file} for volume mount using yq..."
+if ! sudo jq "$JQ_FILTER" "${XRAY_CONFIG_FILE}" | sudo tee "${XRAY_CONFIG_FILE}.tmp" > /dev/null; then
+    echo "Error: Failed to update Xray config with 'jq'. Check JSON syntax or permissions."
+    echo "Original config restored from backup (if created)."
+    sudo mv "${XRAY_CONFIG_FILE}.bak" "${XRAY_CONFIG_FILE}" 2>/dev/null
+    exit 1
+fi
 
-    # Define the new volume mount string
-    local container_node_cert_path="${container_cert_base_path}/${node_domain}"
-    local new_volume_mount="${panel_node_cert_path}:${container_node_cert_path}"
+# Replace the original file with the updated one
+sudo mv "${XRAY_CONFIG_FILE}.tmp" "${XRAY_CONFIG_FILE}" || { echo "Error: Failed to move temporary config file. Exiting."; exit 1; }
 
-    # Check if the volume mount already exists
-    # yq '.services.remnawave.volumes[]' docker-compose.yml will list all volumes
-    if yq ".services.remnawave.volumes[] | select(. == \"${new_volume_mount}\")" "${docker_compose_file}" > /dev/null 2>&1; then
-        echo "Volume mount already exists: ${new_volume_mount}. No changes needed for docker-compose.yml."
+echo "Xray config.json updated successfully."
+
+# Restart Xray Service
+echo "Restarting Xray service to apply changes..."
+if command_exists systemctl; then
+    sudo systemctl restart xray || { echo "Error: Failed to restart Xray service. Check 'sudo systemctl status xray'."; exit 1; }
+    sudo systemctl status xray --no-pager || { echo "Check Xray service status manually."; }
+elif command_exists docker; then
+    # Assuming Xray is in a container named 'xray' or 'remnawave_xray' or similar
+    # This might need manual adjustment if container name is different
+    echo "Attempting to restart Xray Docker container..."
+    XRAY_CONTAINER_NAME=$(sudo docker ps --format '{{.Names}}' | grep -i "xray\|remnawave")
+    if [[ -z "$XRAY_CONTAINER_NAME" ]]; then
+        echo "Warning: Could not find a running Xray/Remnawave container. Please restart manually."
     else
-        echo "Adding new volume mount: ${new_volume_mount}"
-        # Use yq to append the new volume mount
-        if ! yq ".services.remnawave.volumes += [\"${new_volume_mount}\"]" -i "${docker_compose_file}"; then
-            echo "Error: Failed to add volume mount to docker-compose.yml. Check file structure and yq syntax."
-            return 1
-        fi
-        echo "docker-compose.yml updated successfully."
+        sudo docker restart "$XRAY_CONTAINER_NAME" || { echo "Error: Failed to restart Xray Docker container. Check 'sudo docker logs $XRAY_CONTAINER_NAME'."; exit 1; }
+        echo "Xray Docker container '$XRAY_CONTAINER_NAME' restarted successfully."
+        echo "Check logs: sudo docker logs -f $XRAY_CONTAINER_NAME"
     fi
-    echo "$container_node_cert_path" # Return the path for later use
-}
-
-# --- Function to restart Docker Compose ---
-restart_docker_compose() {
-    local remnawave_compose_dir="$1" # Updated variable name
-    echo "Restarting Docker Compose to apply changes..."
-    
-    cd "${remnawave_compose_dir}" || { echo "Error: Could not change to Remnawave compose directory."; return 1; } # Updated variable name
-    
-    if ! sudo docker compose down; then
-        echo "Error: Failed to stop Docker Compose."; return 1;
-    fi
-    if ! sudo docker compose up -d; then
-        echo "Error: Failed to start Docker Compose."; return 1;
-    fi
-    echo "Docker Compose restarted successfully."
-}
-
-# --- Main Execution Flow ---
-if ! PANEL_HOST_NODE_CERT_PATH=$(copy_certs_from_node "$NODE_USER" "$NODE_IP" "$NODE_DOMAIN" "$PANEL_HOST_CERT_BASE_PATH" "$SSH_KEY_PATH"); then
-    echo "Script aborted due to certificate copy error."
-    exit 1
-fi
-
-if ! CONTAINER_NODE_CERT_PATH=$(update_docker_compose_volumes "$DOCKER_COMPOSE_FILE" "$NODE_DOMAIN" "$PANEL_HOST_NODE_CERT_PATH" "$CONTAINER_CERT_BASE_PATH"); then
-    echo "Script aborted due to docker-compose.yml update error."
-    exit 1
-fi
-
-if ! restart_docker_compose "$REMNAWAVE_COMPOSE_DIR"; then # Updated variable name
-    echo "Script aborted due to Docker Compose restart error."
-    exit 1
+else
+    echo "Warning: Cannot determine how to restart Xray service. Please restart manually."
 fi
 
 echo -e "\n--- Automation Complete ---"
-echo "SSL Certificate setup for ${NODE_DOMAIN} is complete on Panel VPS."
-echo "Next Steps:"
-echo "1. Log in to your Remnawave Panel (Web UI)."
-echo "2. When configuring the Xray Inbound for ${NODE_DOMAIN}, ensure you set the certificate paths as follows:"
-echo "   \"keyFile\": \"${CONTAINER_NODE_CERT_PATH}/privkey.pem\","
-echo "   \"certificateFile\": \"${CONTAINER_NODE_CERT_PATH}/fullchain.pem\""
-echo "   (Note: Use .pem for both, as Let's Encrypt typically provides privkey.pem)"
-echo "3. Push the updated configuration to your Xray Node."
-echo -e "\nExcellent work, Squall! You've mastered automation with Bash!"
+echo "SSL Certificate paths for ${NODE_DOMAIN} have been updated in ${XRAY_CONFIG_FILE}."
+echo "Please verify Xray logs for any errors after restart (e.g., sudo journalctl -u xray -f or sudo docker logs -f <container_name>)."
+echo -e "\nExcellent work, Squall! You've successfully automated your Xray certificate updates on the Node!"
