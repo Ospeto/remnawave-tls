@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# --- Default Configuration Values ---
-DEFAULT_XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json" # Common Xray config path
-DEFAULT_LE_CERT_BASE_PATH="/etc/letsencrypt/live" # Standard Let's Encrypt certs path
-
 # --- Function to get user input with a default value ---
 get_input_with_default() {
     local prompt="$1"
@@ -30,117 +26,80 @@ command_exists() {
 }
 
 # --- Main Script ---
-echo "--- Xray Node SSL Certificate Path Updater (Bash) ---"
-echo "This script will find your Let's Encrypt certificates and update your Xray config.json."
-echo "-----------------------------------------------------"
+echo "--- Xray Node SSL Certificate Acquisition Script ---"
+echo "This script will help you obtain an SSL Certificate from Let's Encrypt for your Xray Node."
+echo "Please ensure your domain's A record points to this VPS's Public IP address."
+echo "----------------------------------------------------"
 
-# 1. Check for 'jq' tool
-echo "Checking for 'jq' tool (JSON processor)..."
-if ! command_exists jq; then
-    echo "Error: 'jq' tool not found. Please install it first."
-    echo "  For Ubuntu/Debian: sudo apt update && sudo apt install -y jq"
-    echo "  Refer to https://stedolan.github.io/jq/ for other installation methods."
-    exit 1
+# 1. Update system and install Certbot
+echo "Checking for Certbot installation..."
+if ! command_exists certbot; then
+    echo "Certbot not found. Installing Certbot..."
+    sudo apt update || { echo "Failed to update system. Exiting."; exit 1; }
+    sudo apt install -y certbot || { echo "Failed to install Certbot. Exiting."; exit 1; }
+    echo "Certbot installed successfully."
 else
-    echo "'jq' is installed."
+    echo "Certbot is already installed."
 fi
 
-# Get User Inputs
-NODE_DOMAIN=$(get_input_with_default "Enter Node Domain Name (e.g., node1.example.com for which certs are issued)" "")
+# 2. Get User Inputs
+echo -e "\n--- Enter Your Node's Domain Information ---"
+NODE_DOMAIN=$(get_input_with_default "Enter your Node's Domain Name (e.g., node1.yourdomain.com)" "")
 if [[ -z "$NODE_DOMAIN" ]]; then
-    echo "Node Domain Name cannot be empty. Exiting."
+    echo "Domain Name cannot be empty. Exiting."
     exit 1
 fi
 
-XRAY_CONFIG_FILE=$(get_input_with_default "Enter Xray config.json path" "$DEFAULT_XRAY_CONFIG_PATH")
-if [[ ! -f "$XRAY_CONFIG_FILE" ]]; then
-    echo "Error: Xray config file not found at ${XRAY_CONFIG_FILE}. Please provide the correct path."
+ADMIN_EMAIL=$(get_input_with_default "Enter your Email Address for urgent renewals/security notices (e.g., your@example.com)" "")
+if [[ -z "$ADMIN_EMAIL" ]]; then
+    echo "Email Address cannot be empty. Exiting."
     exit 1
 fi
 
-# Determine certificate paths
-CERT_DIR="${DEFAULT_LE_CERT_BASE_PATH}/${NODE_DOMAIN}"
-PRIVKEY_PATH="${CERT_DIR}/privkey.pem"
-FULLCHAIN_PATH="${CERT_DIR}/fullchain.pem"
+# Determine validation method
+echo -e "\n--- Choose Certificate Validation Method ---"
+echo "1) HTTP validation (Recommended: Requires Port 80 to be open)"
+echo "2) DNS validation (Requires manual DNS TXT record addition)"
+VALIDATION_METHOD=$(get_input_with_default "Enter your choice (1 or 2)" "1")
 
-if [[ ! -f "$PRIVKEY_PATH" || ! -f "$FULLCHAIN_PATH" ]]; then
-    echo "Error: SSL certificates not found for ${NODE_DOMAIN} at ${CERT_DIR}."
-    echo "Please ensure Let's Encrypt certificates are issued and located there."
-    exit 1
-fi
+CERT_COMMAND=""
+case "$VALIDATION_METHOD" in
+    1)
+        echo "Using HTTP validation (certonly --standalone)."
+        echo "Please ensure Port 80 (HTTP) is open and accessible from the internet."
+        CERT_COMMAND="sudo certbot certonly --standalone -d ${NODE_DOMAIN} --email ${ADMIN_EMAIL} --agree-tos --no-eff-email"
+        ;;
+    2)
+        echo "Using DNS validation (--manual --preferred-challenges dns)."
+        echo "You will need to manually add a DNS TXT record to your domain's DNS settings."
+        CERT_COMMAND="sudo certbot certonly --manual --preferred-challenges dns -d ${NODE_DOMAIN} --email ${ADMIN_EMAIL} --agree-tos --no-eff-email"
+        ;;
+    *)
+        echo "Invalid choice. Exiting."
+        exit 1
+        ;;
+esac
 
-echo -e "\n--- Configuration Summary ---"
-echo "Node Domain: ${NODE_DOMAIN}"
-echo "Xray Config File: ${XRAY_CONFIG_FILE}"
-echo "Private Key Path: ${PRIVKEY_PATH}"
-echo "Fullchain Cert Path: ${FULLCHAIN_PATH}"
-echo "-----------------------------"
-
-# Find the tag for the inbound that uses TLS
-echo -e "\nSearching for TLS inbound tag in ${XRAY_CONFIG_FILE}..."
-# This finds the tag of the inbound that has streamSettings.security as "tls" AND has "serverName" matching NODE_DOMAIN
-TLS_INBOUND_TAG=$(jq -r ".inbounds[] | select(.streamSettings.security == \"tls\" and .streamSettings.tlsSettings.serverName == \"${NODE_DOMAIN}\") | .tag" "$XRAY_CONFIG_FILE")
-
-if [[ -z "$TLS_INBOUND_TAG" ]]; then
-    echo "Error: Could not find an Xray inbound with TLS security and serverName matching '${NODE_DOMAIN}'."
-    echo "Please ensure your Xray config has a TLS inbound for this domain."
-    echo "Exiting."
-    exit 1
+# 3. Execute Certbot Command
+echo -e "\n--- Executing Certbot ---"
+echo "Command: ${CERT_COMMAND}"
+if eval "$CERT_COMMAND"; then
+    echo -e "\n--- SSL Certificate Obtained Successfully! ---"
+    echo "Your certificates are located at: /etc/letsencrypt/live/${NODE_DOMAIN}/"
+    echo "Specifically:"
+    echo "  Private Key: /etc/letsencrypt/live/${NODE_DOMAIN}/privkey.pem"
+    echo "  Full Chain Certificate: /etc/letsencrypt/live/${NODE_DOMAIN}/fullchain.pem"
+    echo "You can now copy these files to your Panel VPS."
 else
-    echo "Found TLS inbound tag: '${TLS_INBOUND_TAG}'"
-fi
-
-# Backup the original Xray config
-echo "Creating a backup of your Xray config: ${XRAY_CONFIG_FILE}.bak"
-sudo cp "$XRAY_CONFIG_FILE" "${XRAY_CONFIG_FILE}.bak" || { echo "Error: Failed to create backup. Exiting."; exit 1; }
-
-echo "Updating certificate paths in Xray config.json using 'jq'..."
-
-# Update the certificate paths for the identified inbound tag
-# Construct the jq filter dynamically
-JQ_FILTER="
-.inbounds[] |= if .tag == \"${TLS_INBOUND_TAG}\" then
-    .streamSettings.tlsSettings.certificates[0].keyFile = \"${PRIVKEY_PATH}\" |
-    .streamSettings.tlsSettings.certificates[0].certificateFile = \"${FULLCHAIN_PATH}\"
-else
-    .
-end
-"
-
-if ! sudo jq "$JQ_FILTER" "${XRAY_CONFIG_FILE}" | sudo tee "${XRAY_CONFIG_FILE}.tmp" > /dev/null; then
-    echo "Error: Failed to update Xray config with 'jq'. Check JSON syntax or permissions."
-    echo "Original config restored from backup (if created)."
-    sudo mv "${XRAY_CONFIG_FILE}.bak" "${XRAY_CONFIG_FILE}" 2>/dev/null
+    echo -e "\n--- Failed to Obtain SSL Certificate ---"
+    echo "Please check the error messages above and ensure:"
+    echo "1. Your domain's A record correctly points to this VPS's IP."
+    echo "2. Port 80 is open if you chose HTTP validation."
+    echo "3. Your DNS TXT record is correctly added if you chose DNS validation."
     exit 1
 fi
 
-# Replace the original file with the updated one
-sudo mv "${XRAY_CONFIG_FILE}.tmp" "${XRAY_CONFIG_FILE}" || { echo "Error: Failed to move temporary config file. Exiting."; exit 1; }
-
-echo "Xray config.json updated successfully."
-
-# Restart Xray Service
-echo "Restarting Xray service to apply changes..."
-if command_exists systemctl; then
-    sudo systemctl restart xray || { echo "Error: Failed to restart Xray service. Check 'sudo systemctl status xray'."; exit 1; }
-    sudo systemctl status xray --no-pager || { echo "Check Xray service status manually."; }
-elif command_exists docker; then
-    # Assuming Xray is in a container named 'xray' or 'remnawave_xray' or similar
-    # This might need manual adjustment if container name is different
-    echo "Attempting to restart Xray Docker container..."
-    XRAY_CONTAINER_NAME=$(sudo docker ps --format '{{.Names}}' | grep -i "xray\|remnawave")
-    if [[ -z "$XRAY_CONTAINER_NAME" ]]; then
-        echo "Warning: Could not find a running Xray/Remnawave container. Please restart manually."
-    else
-        sudo docker restart "$XRAY_CONTAINER_NAME" || { echo "Error: Failed to restart Xray Docker container. Check 'sudo docker logs $XRAY_CONTAINER_NAME'."; exit 1; }
-        echo "Xray Docker container '$XRAY_CONTAINER_NAME' restarted successfully."
-        echo "Check logs: sudo docker logs -f $XRAY_CONTAINER_NAME"
-    fi
-else
-    echo "Warning: Cannot determine how to restart Xray service. Please restart manually."
-fi
-
-echo -e "\n--- Automation Complete ---"
-echo "SSL Certificate paths for ${NODE_DOMAIN} have been updated in ${XRAY_CONFIG_FILE}."
-echo "Please verify Xray logs for any errors after restart (e.g., sudo journalctl -u xray -f or sudo docker logs -f <container_name>)."
-echo -e "\nExcellent work, Squall! You've successfully automated your Xray certificate updates on the Node!"
+echo -e "\n--- Script Complete ---"
+echo "Now, you can use the 'manage_xray_certs_interactive.py' script on your Panel VPS"
+echo "to copy these certificates and update your Marzban Docker Compose configuration."
+echo "Good job, Squall! One step closer to full automation and a more secure setup!"
